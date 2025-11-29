@@ -1,51 +1,104 @@
 // compiler.js - Main compiler controller that orchestrates the compilation process
 
-const { normalizePath } = await dc.require(dc.resolvePath("utils.js"));
-const { scanDirectory } = await dc.require(dc.resolvePath("fileDiscovery.js"));
-const { extractDependencies } = await dc.require(dc.resolvePath("dependencyAnalyzer.js"));
-const { buildDependencyOrder } = await dc.require(dc.resolvePath("dependencyGraph.js"));
-const { rewriteImports, rewriteCssReferences } = await dc.require(dc.resolvePath("importRewriter.js"));
-const { generateBundle } = await dc.require(dc.resolvePath("bundleGenerator.js"));
-const { writeToVault } = await dc.require(dc.resolvePath("fileWriter.js"));
-const { detectCssReferences, getCssModuleName } = await dc.require(dc.resolvePath("cssReferenceAnalyzer.js"));
-const { minify, minifyWithObfuscation } = await dc.require(dc.resolvePath("minifier.js"));
-
 async function compile(projectDir, mainComponentName, outputFileName, options = {}) {
   try {
     validateInputs(projectDir, mainComponentName, outputFileName);
 
+    const activeFile = dc.app.workspace.getActiveFile().path;
+    const { normalizePath } = await dc.require(dc.headerLink(activeFile, "utils"));
+    
     const normalizedProjectDir = normalizePath(projectDir);
     await validateProjectDirectory(normalizedProjectDir);
 
     const compiledNoteName = extractNoteName(outputFileName);
+    
+    // Extract new options
+    const outputDir = options.outputDir ? normalizePath(options.outputDir) : 'dist';
+    const version = options.version || null;
+    const changelog = options.changelog || null;
+    const includeDemo = options.includeDemo !== false; // Default to true
+    const additionalFiles = options.additionalFiles || [];
 
     const minifyOptions = {
       enabled: options.minify || false,
       obfuscate: options.obfuscate || false
     };
+    
+    // Create output directory if it doesn't exist
+    await ensureOutputDirectory(outputDir);
 
-    const files = await scanAndAnalyzeFiles(normalizedProjectDir);
-    const cssData = await detectAndReadCssFiles(files, compiledNoteName, normalizedProjectDir);
-    const orderedFiles = buildDependencyOrder(files, mainComponentName);
+    const modules = await loadModules(activeFile);
+    const files = await scanAndAnalyzeFiles(normalizedProjectDir, modules);
+    const cssData = await detectAndReadCssFiles(files, modules, compiledNoteName, normalizedProjectDir);
+    const orderedFiles = modules.buildDependencyOrder(files, mainComponentName);
 
-    rewriteAllImports(orderedFiles, files, compiledNoteName, cssData);
+    rewriteAllImports(orderedFiles, files, modules, compiledNoteName, cssData);
 
     if (minifyOptions.enabled) {
-      applyMinification(orderedFiles, minifyOptions);
+      applyMinification(orderedFiles, modules, minifyOptions);
     }
 
-    const bundleContent = generateBundle(
+    const bundleContent = modules.generateBundle(
       orderedFiles, 
       normalizedProjectDir, 
       mainComponentName, 
       compiledNoteName, 
       cssData.cssFiles,
-      minifyOptions
+      minifyOptions,
+      version,
+      includeDemo
     );
 
-    const writeResult = await writeToVault(bundleContent, outputFileName);
+    // Construct full output path with directory
+    const fullOutputPath = `${outputDir}/${outputFileName}`;
+    const writeResult = await modules.writeToVault(bundleContent, fullOutputPath);
+    
+    // Write VERSION file if version provided
+    let versionPath = null;
+    if (version) {
+      const versionFilePath = `${outputDir}/VERSION`;
+      const versionResult = await modules.writeToVault(version, versionFilePath, false);
+      if (versionResult.success) {
+        versionPath = versionResult.path;
+      }
+    }
+    
+    // Write CHANGELOG.md file if changelog provided
+    let changelogPath = null;
+    if (changelog) {
+      const changelogFilePath = `${outputDir}/CHANGELOG.md`;
+      const changelogResult = await modules.writeToVault(changelog, changelogFilePath);
+      if (changelogResult.success) {
+        changelogPath = changelogResult.path;
+      }
+    }
+    
+    // Copy additional files for distribution
+    const copiedFiles = [];
+    if (additionalFiles && additionalFiles.length > 0) {
+      for (const filePath of additionalFiles) {
+        try {
+          const fileExists = await dc.app.vault.adapter.exists(filePath);
+          if (!fileExists) {
+            console.warn(`Additional file not found: ${filePath} - skipping`);
+            continue;
+          }
+          
+          const fileContent = await dc.app.vault.adapter.read(filePath);
+          const fileName = filePath.substring(filePath.lastIndexOf('/') + 1);
+          const outputFilePath = `${outputDir}/${fileName}`;
+          
+          const copyResult = await modules.writeToVault(fileContent, outputFilePath, false);
+          if (copyResult.success) {
+            copiedFiles.push(copyResult.path);
+          }
+        } catch (error) {
+          console.warn(`Failed to copy additional file ${filePath}: ${error.message} - skipping`);
+        }
+      }
+    }
 
-    return buildResult(writeResult, orderedFiles.length, cssData.cssFiles.length);
+    return buildResult(writeResult, orderedFiles.length, cssData.cssFiles.length, versionPath, changelogPath, copiedFiles);
 
   } catch (error) {
     return {
@@ -84,25 +137,42 @@ function extractNoteName(outputFileName) {
   return name;
 }
 
-async function scanAndAnalyzeFiles(projectDir) {
-  const files = await scanDirectory(projectDir);
+async function loadModules(activeFile) {
+  return {
+    scanDirectory: (await dc.require(dc.headerLink(activeFile, "fileDiscovery"))).scanDirectory,
+    extractDependencies: (await dc.require(dc.headerLink(activeFile, "dependencyAnalyzer"))).extractDependencies,
+    buildDependencyOrder: (await dc.require(dc.headerLink(activeFile, "dependencyGraph"))).buildDependencyOrder,
+    rewriteImports: (await dc.require(dc.headerLink(activeFile, "importRewriter"))).rewriteImports,
+    rewriteCssReferences: (await dc.require(dc.headerLink(activeFile, "importRewriter"))).rewriteCssReferences,
+    generateBundle: (await dc.require(dc.headerLink(activeFile, "bundleGenerator"))).generateBundle,
+    writeToVault: (await dc.require(dc.headerLink(activeFile, "fileWriter"))).writeToVault,
+    detectCssReferences: (await dc.require(dc.headerLink(activeFile, "cssReferenceAnalyzer"))).detectCssReferences,
+    getCssModuleName: (await dc.require(dc.headerLink(activeFile, "cssReferenceAnalyzer"))).getCssModuleName,
+    minify: (await dc.require(dc.headerLink(activeFile, "minifier"))).minify,
+    minifyWithObfuscation: (await dc.require(dc.headerLink(activeFile, "minifier"))).minifyWithObfuscation
+  };
+}
+
+async function scanAndAnalyzeFiles(projectDir, modules) {
+  const files = await modules.scanDirectory(projectDir);
   
   for (const file of files) {
-    file.dependencies = extractDependencies(file.content);
+    file.dependencies = modules.extractDependencies(file.content);
   }
   
   return files;
 }
 
-async function detectAndReadCssFiles(files, compiledNoteName, projectDir) {
+async function detectAndReadCssFiles(files, modules, compiledNoteName, projectDir) {
   console.log(`[CSS Detection] Scanning ${files.length} files for CSS references`);
   
   const fileCssReferences = new Map();
   const cssFilesNeeded = new Set();
-  const partialCssFilenames = new Map();
+  const partialCssFilenames = new Map(); // filename -> full path mapping
   
+  // First pass: collect all CSS references
   for (const file of files) {
-    const cssRefs = detectCssReferences(file.content);
+    const cssRefs = modules.detectCssReferences(file.content);
     if (cssRefs.length > 0) {
       console.log(`[CSS Detection] File "${file.nameWithoutExt}" has ${cssRefs.length} CSS references`);
       fileCssReferences.set(file.nameWithoutExt, cssRefs);
@@ -111,11 +181,13 @@ async function detectAndReadCssFiles(files, compiledNoteName, projectDir) {
         if (ref.pattern === 'headerLink') continue;
         
         if (ref.isPartialPath) {
+          // Template literal - only has filename, need to search for it
           if (ref.filePath) {
             console.log(`[CSS Detection] Partial path to resolve: ${ref.filePath}`);
-            partialCssFilenames.set(ref.filePath, null);
+            partialCssFilenames.set(ref.filePath, null); // Mark for resolution
           }
         } else {
+          // Full path available
           if (ref.filePath) {
             console.log(`[CSS Detection] Full path: ${ref.filePath}`);
             cssFilesNeeded.add(ref.filePath);
@@ -125,6 +197,7 @@ async function detectAndReadCssFiles(files, compiledNoteName, projectDir) {
     }
   }
 
+  // Resolve partial filenames by searching project directory
   if (partialCssFilenames.size > 0) {
     console.log(`[CSS Resolution] Searching for ${partialCssFilenames.size} partial CSS filenames`);
     const foundCssFiles = await findCssFilesInDirectory(projectDir, Array.from(partialCssFilenames.keys()));
@@ -141,8 +214,9 @@ async function detectAndReadCssFiles(files, compiledNoteName, projectDir) {
 
   console.log(`[CSS Bundling] Reading ${cssFilesNeeded.size} CSS files`);
 
+  // Read all CSS files
   const cssFiles = [];
-  const resolvedCssRefs = new Set();
+  const resolvedCssRefs = new Set(); // Track which references were successfully resolved
   
   for (const cssPath of cssFilesNeeded) {
     try {
@@ -153,7 +227,7 @@ async function detectAndReadCssFiles(files, compiledNoteName, projectDir) {
       }
 
       const cssContent = await dc.app.vault.adapter.read(cssPath);
-      const moduleName = getCssModuleName(cssPath);
+      const moduleName = modules.getCssModuleName(cssPath);
       const segments = cssPath.split(/[/\\]/);
       const filename = segments[segments.length - 1];
       
@@ -166,14 +240,16 @@ async function detectAndReadCssFiles(files, compiledNoteName, projectDir) {
       
       console.log(`[CSS Bundling] Bundled: ${filename} as module "${moduleName}"`);
       
+      // Mark this path/filename as resolved
       resolvedCssRefs.add(cssPath);
-      resolvedCssRefs.add(filename);
+      resolvedCssRefs.add(filename); // Also add just the filename
       
     } catch (error) {
       console.warn(`Failed to read CSS file ${cssPath}: ${error.message} - skipping`);
     }
   }
 
+  // Update partial references with resolved paths
   for (const [fileName, refs] of fileCssReferences) {
     for (const ref of refs) {
       if (ref.isPartialPath && ref.filePath) {
@@ -190,6 +266,7 @@ async function detectAndReadCssFiles(files, compiledNoteName, projectDir) {
   return { cssFiles, fileCssReferences, resolvedCssRefs };
 }
 
+// Helper function to search for CSS files by filename in project directory
 async function findCssFilesInDirectory(dirPath, filenames) {
   const filenameSet = new Set(filenames);
   const results = new Map(filenames.map(f => [f, null]));
@@ -373,22 +450,27 @@ function buildPreserveSet(orderedFiles) {
   return { preserveSet, usedShortNames };
 }
 
-function rewriteAllImports(orderedFiles, allFiles, compiledNoteName, cssData) {
+function rewriteAllImports(orderedFiles, allFiles, modules, compiledNoteName, cssData) {
   const allFileNames = allFiles.map(f => f.nameWithoutExt);
 
   console.log(`[Compiler] Rewriting imports for ${orderedFiles.length} files`);
 
   for (const file of orderedFiles) {
-    file.content = rewriteImports(file.content, allFileNames, compiledNoteName);
+    // First: Rewrite JS imports
+    file.content = modules.rewriteImports(file.content, allFileNames, compiledNoteName);
     
-    const cssRefs = detectCssReferences(file.content);
+    // Second: Re-detect CSS references in the UPDATED content with new correct indices
+    const cssRefs = modules.detectCssReferences(file.content);
     
     if (cssRefs && cssRefs.length > 0) {
       console.log(`[Compiler] File "${file.nameWithoutExt}" has ${cssRefs.length} CSS references in updated content`);
       
+      // Filter to only rewrite CSS references that were successfully resolved
       const resolvedRefs = cssRefs.filter(ref => {
-        if (ref.pattern === 'headerLink') return true;
+        if (ref.pattern === 'headerLink') return true; // Already converted
         
+        // Check if this CSS file was bundled
+        // For partial paths, check if the filename was resolved
         if (ref.isPartialPath && ref.filePath) {
           const wasResolved = cssData.resolvedCssRefs.has(ref.filePath);
           if (!wasResolved) {
@@ -397,6 +479,7 @@ function rewriteAllImports(orderedFiles, allFiles, compiledNoteName, cssData) {
           return wasResolved;
         }
         
+        // For full paths, check the path directly
         if (ref.filePath) {
           const wasResolved = cssData.resolvedCssRefs.has(ref.filePath);
           if (!wasResolved) {
@@ -411,8 +494,10 @@ function rewriteAllImports(orderedFiles, allFiles, compiledNoteName, cssData) {
       console.log(`[Compiler] ${resolvedRefs.length} of ${cssRefs.length} CSS references will be rewritten`);
       
       if (resolvedRefs.length > 0) {
+        // Update resolvedPath for partial references
         for (const ref of resolvedRefs) {
           if (ref.isPartialPath && ref.filePath && !ref.resolvedPath) {
+            // Find the full path from our bundled files
             for (const cssFile of cssData.cssFiles) {
               if (cssFile.name === ref.filePath) {
                 ref.resolvedPath = cssFile.path;
@@ -424,7 +509,7 @@ function rewriteAllImports(orderedFiles, allFiles, compiledNoteName, cssData) {
         }
         
         const beforeLength = file.content.length;
-        file.content = rewriteCssReferences(file.content, resolvedRefs, compiledNoteName);
+        file.content = modules.rewriteCssReferences(file.content, resolvedRefs, compiledNoteName);
         const afterLength = file.content.length;
         console.log(`[Compiler] Content length change: ${beforeLength} -> ${afterLength} (${afterLength - beforeLength > 0 ? '+' : ''}${afterLength - beforeLength})`);
       }
@@ -432,7 +517,7 @@ function rewriteAllImports(orderedFiles, allFiles, compiledNoteName, cssData) {
   }
 }
 
-function applyMinification(orderedFiles, minifyOptions) {
+function applyMinification(orderedFiles, modules, minifyOptions) {
   let globalCounter = 0;
   const { preserveSet, usedShortNames } = buildPreserveSet(orderedFiles);
   
@@ -442,7 +527,7 @@ function applyMinification(orderedFiles, minifyOptions) {
   for (const file of orderedFiles) {
     if (minifyOptions.obfuscate) {
       console.log(`[Obfuscation] Processing ${file.nameWithoutExt}, counter start: ${globalCounter}`);
-      const result = minifyWithObfuscation(
+      const result = modules.minifyWithObfuscation(
         file.content, 
         { ...minifyOptions, counterStart: globalCounter, preserveNames: preserveSet, usedShortNames }
       );
@@ -450,21 +535,46 @@ function applyMinification(orderedFiles, minifyOptions) {
       console.log(`[Obfuscation] Finished ${file.nameWithoutExt}, counter end: ${result.nextCounter}`);
       globalCounter = result.nextCounter;
     } else {
-      file.content = minify(file.content, minifyOptions);
+      file.content = modules.minify(file.content, minifyOptions);
     }
   }
   
   console.log('[Obfuscation] Final counter:', globalCounter);
 }
 
-function buildResult(writeResult, filesProcessed, cssFilesProcessed) {
+async function ensureOutputDirectory(outputDir) {
+  try {
+    const exists = await dc.app.vault.adapter.exists(outputDir);
+    if (!exists) {
+      await dc.app.vault.adapter.mkdir(outputDir);
+    }
+  } catch (error) {
+    throw new Error(`Failed to create output directory: ${outputDir}. ${error.message}`);
+  }
+}
+
+function buildResult(writeResult, filesProcessed, cssFilesProcessed, versionPath = null, changelogPath = null, copiedFiles = []) {
   if (writeResult.success) {
-    return {
+    const result = {
       success: true,
       outputPath: writeResult.path,
       filesProcessed,
       cssFilesProcessed
     };
+    
+    if (versionPath) {
+      result.versionPath = versionPath;
+    }
+    
+    if (changelogPath) {
+      result.changelogPath = changelogPath;
+    }
+    
+    if (copiedFiles.length > 0) {
+      result.copiedFiles = copiedFiles;
+    }
+    
+    return result;
   } else {
     return {
       success: false,
