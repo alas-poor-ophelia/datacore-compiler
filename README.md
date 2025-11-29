@@ -76,6 +76,5 @@ These are bundled as JavaScript modules returning the CSS string, which you can 
 - Obsidian with the Datacore plugin installed and enabled
 
 ## Thanks to
-[Blacksmithgu](https://github.com/blacksmithgu) for creating Datacore, which made this all possible.
-
-[Beto](https://github.com/beto-group) for tons of DC inspiration, and the foundational idea of this compiler.
+- [Blacksmithgu](https://github.com/blacksmithgu) for creating Datacore, which made this all possible.
+- [Beto](https://github.com/beto-group) for tons of DC inspiration, and the foundational idea of this compiler.
