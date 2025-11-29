@@ -1,6 +1,6 @@
 // fileWriter.js - Write compiled content to vault
 
-async function writeToVault(content, outputFileName) {
+async function writeToVault(content, outputFileName, autoAddMd = true) {
   if (typeof content !== 'string') {
     return { success: false, error: 'Content must be a string' };
   }
@@ -10,7 +10,9 @@ async function writeToVault(content, outputFileName) {
   }
 
   let finalFileName = outputFileName.trim();
-  if (!finalFileName.endsWith('.md')) {
+  
+  // Add .md extension if autoAddMd is true and filename has no extension
+  if (autoAddMd && !finalFileName.endsWith('.md')) {
     finalFileName += '.md';
   }
 
